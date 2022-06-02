@@ -1,23 +1,20 @@
 classdef Policy < handle
+    
     properties % A*算法变量
         nextAx
         path
-        lastpath
     end
     
     properties 
         getpathflag %全局下是否搜索到路径 0没有 1有
-        getlastpathflag %局部地图的关键变量
-        pL
     end
     
     properties 
         mapdata%全局地图信息
-        dilateMap
-        borderMap
+        dilateMap % 膨胀后的地图信息
+        borderMap % 边缘加权重后的地图信息
         map
         obstacle
-        
     end
     
     properties 
@@ -41,7 +38,7 @@ classdef Policy < handle
         function self = Policy()
             self.getpathflag=0;
             
-            
+            % 8邻域
             self.nextborder = [-1,1;...
                         0,1;...
                         1,1;...
@@ -64,78 +61,68 @@ classdef Policy < handle
             self.intergral = 0;
             self.last_error = 0;
             self.fuzflag=0;
-            
-            
-            self.getlastpathflag=0;%局部变量，初始设为0，以便在起点先A*搜索一次
-            self.mapdata=zeros(50);
         end
         
         %% action主函数
         function action=action(self,observation)
-
-            self.mapdata=double(self.mapdata|observation.scanMap');
-            
-            self.Initgetpath(observation);
-            self.dilate();
-            self.border();
-            
-            if self.getlastpathflag == 1
-                self.checkpath();
-            end
-            
-            %这个if里的内容是“小车切入新路径”
-            %所以只需要在getpathflag为0，即刚规划了新的最优路径时才进入
+%             if observation.collide
+%                 action=[-10,rand(1)-0.5];
+%             else
+%                 action=[10,rand(1)-0.5];
+%             end
             if self.getpathflag==0
-                self.getobstacle();
+                self.mapdata=observation.map';
+                self.Initgetpath(observation);
                 self.Ax();
+                
                 len=length(self.path(:,1));
 
+	% 对整条路径进行优化处理：
+	% 若路径中的某点是边缘点且有转角，则要特殊处理，否则可能卡死；若无这样的点则最优路径不变
                 for i=2:len-2
-                    kangle1=atan2((self.path(i-1,2)-self.path(i,2)),(self.path(i-1,1)-self.path(i,1)));
-                    kangle2=atan2((self.path(i,2)-self.path(i+1,2)),(self.path(i,1)-self.path(i+1,1)));
+                    kangle1=atan2((self.path(i-1,2)-self.path(i,2)),(self.path(i-1,1)-self.path(i,1))); %与后一个点的夹角
+                    kangle2=atan2((self.path(i,2)-self.path(i+1,2)),(self.path(i,1)-self.path(i+1,1))); %与前一个点的夹角
                     dkangle=self.changerad(kangle1-kangle2);
+                    % agent的H是会不断累积增大的，所以要将其转换到(-pi，pi]区间
 
+                    %找到路径中的整数点
                     if self.path(i,2)==fix(self.path(i,2)) && self.path(i,1)==fix(self.path(i,1))
                         if self.borderMap(self.path(i,2),self.path(i,1))==2 && abs(dkangle)>0.7
+
                             if abs(kangle2)==pi/2 && self.borderMap(self.path(i,2),self.path(i,1)-1)==1 && self.borderMap(self.path(i,2),self.path(i,1)+1)==1
                                 self.path(i,:)=self.path(i+2,:)+(self.path(i-1,:)-self.path(i+2,:))/3*2;
                                 self.path(i+1,:)=self.path(i+2,:)+(self.path(i-1,:)-self.path(i+2,:))/3;
-                            elseif abs(kangle1)==pi/2 && dkangle>0
+		% 用后面的路径点进行插值处理，相当于给了一个提前量
+
+                            elseif abs(kangle1)==pi/2
                                 self.path(i,:)=self.path(i+1,:)+(self.path(i-2,:)-self.path(i+1,:))/3;
                                 self.path(i-1,:)=self.path(i+1,:)+(self.path(i-2,:)-self.path(i+1,:))/3*2;
                                 self.path(i-2,:)=[self.path(i-2,1),self.path(i-2,2)+0.1];
-                            elseif abs(kangle1)==pi/2 && dkangle<0
-                                if i+1<len
-                                    self.path(i+1,:)=self.path(i+1,:)-[1,0];
-                                end
-                                if i+2<len
-                                    self.path(i+2,:)=self.path(i+2,:)-[1,0];
-                                end
                             end
+
                             if abs(kangle2)==0 && self.borderMap(self.path(i,2)-1,self.path(i,1))==1 && self.borderMap(self.path(i,2)+1,self.path(i,1))==1
                                 self.path(i,:)=self.path(i+2,:)+(self.path(i-1,:)-self.path(i+2,:))/3*2;
                                 self.path(i+1,:)=self.path(i+2,:)+(self.path(i-1,:)-self.path(i+2,:))/3;
+
                             elseif abs(kangle1)==0
                                 self.path(i,:)=self.path(i+2,:)+(self.path(i-1,:)-self.path(i+2,:))/3*2;
                                 self.path(i+1,:)=self.path(i+2,:)+(self.path(i-1,:)-self.path(i+2,:))/3;
-
                             end
+
                         end
                     end
                 end
                 
-                self.lastpath=self.path;
-                self.getlastpathflag=1;
-                
                 self.path=self.path-0.5;
                 self.getpathflag=1;
-                self.pathinter();
+                self.pathinter(); % 路径插值，将整数点变为尽量连续的一系列小数点
                 
                 if length(self.path(:,1))>=1
-                    delete(self.pL); %每次画新路径时，记得把上一条路删了！
-                    self.pL=plot(self.path(:,1),self.path(:,2),'-r','LineWidth',2);
+                    %plot(path(:,1)-0.5,path(:,2)-0.5,'-c','LineWidth',2);
+                    plot(self.path(:,1),self.path(:,2),'-r','LineWidth',2);
                 end
             end
+            
             
             self.now_state=[observation.agent.x,observation.agent.y,observation.agent.h];
             
@@ -162,9 +149,10 @@ classdef Policy < handle
             
             if self.fuzflag==1
                 action=[0,evalfis(self.fis,dangle2)];
-                return;
+                return; % 模糊控制结束，提前退出
             end
             
+            % 直线用pid跟踪
             error = (sin(self.now_state(3) - atan2(min_dy,min_dx))) * sqrt(min_dx*min_dx+min_dy*min_dy);
             
             self.intergral = self.intergral + error;
@@ -207,6 +195,7 @@ classdef Policy < handle
 
                 closelist=[openlist(minFinopen,:);closelist]; 
                 current=openlist(minFinopen,:);
+                %%plot(current(:,1),current(:,2),'rx');%%
                 openlist(minFinopen,:)=[];
 
                 for i=1:8
@@ -249,11 +238,16 @@ classdef Policy < handle
         %% 地图膨胀
         function []=dilate(self)
             self.dilateMap=zeros(50,50);
+
             for i=1:50
                 for j=1:50
+                    %黑色障碍物为1
                     if self.mapdata(i,j)==1
+                        % 内部点8邻域膨胀
                         if i>1 && i<50 && j>1 && j<50
-                            self.dilateMap(i-1:i+1,j-1:j+1)=1;         
+                            self.dilateMap(i-1:i+1,j-1:j+1)=1; 
+                            
+                        %地图边界膨胀，避免出界
                         elseif i==1 && j>1 && j<50
                             self.dilateMap(2,j-1:j+1)=1;       
                         elseif i==50 && j>1 && j<50
@@ -270,64 +264,71 @@ classdef Policy < handle
                             self.dilateMap(49,2)=1;
                         elseif i==50 && j==50
                             self.dilateMap(49,49)=1;
+                            
                         end
                     end
                 end
             end
+
             self.dilateMap(1:50,1)=1;
             self.dilateMap(1:50,50)=1;
             self.dilateMap(1,1:50)=1;
             self.dilateMap(50,1:50)=1;
             %self.dilateMap(48:50,41:43)=0;
-            self.dilateMap(self.map.goal(2)-1:self.map.goal(2)+1,self.map.goal(1)-1:self.map.goal(1)+1)=0;
+	
+	%给终点开个口子
+            self.borderMap(self.map.goal(2)-1:self.map.goal(2)+1, self.map.goal(2)-1:self.map.goal(2)+1)=0;
         end
         
         %% 地图边缘增加权重
         function []=border(self)
+
             self.borderMap=self.dilateMap;
+
             for i=2:49
                 for j=2:49
+
                     if self.dilateMap(i,j)==1
                         for k=1:8
-                            if self.dilateMap(i+self.nextborder(k,1),j+self.nextborder(k,2))~=1
-                                self.borderMap(i+self.nextborder(k,1),j+self.nextborder(k,2))=2;
+                            % 8邻域内有非障碍点，说明该点为障碍物边缘
+                            if self.dilateMap(i+self.nextborder(k,1) , j+self.nextborder(k,2))~=1
+                                self.borderMap(i+self.nextborder(k,1) , j+self.nextborder(k,2))=2;
                             else
                                 continue;
                             end
                         end
                     end
-                    if i==2||j==2||i==49||j==49
+
+                    if i==2 || j==2 || i==49 || j==49
                         if self.dilateMap(i,j)==0
                             self.borderMap(i,j)=2;
                         end
                     end
+
                 end
             end
-            %self.borderMap(48:50,41:43)=0;
-            self.borderMap(self.map.goal(2)-1:self.map.goal(2)+1,self.map.goal(1)-1:self.map.goal(1)+1)=0;
+
+            self.borderMap(self.map.goal(2)-1:self.map.goal(2)+1,self.map.goal(2)-1:self.map.goal(2)+1)=0;
         end
         
         %% 寻路初始化
         function []=Initgetpath(self,observation)
-            self.map.start=[round(observation.agent.x),round(observation.agent.y)];
+            self.map.start=[observation.agent.x,observation.agent.y];
             self.map.goal=[observation.endPos.x+1,observation.endPos.y];
             self.map.XYMAX=50;
-        end
-       
-        
-        %%
-        function []=getobstacle(self)
+            self.dilate();
+            self.border();
+            
             self.obstacle=[];
+
             for i=1:self.map.XYMAX
                 for j=1:self.map.XYMAX
                     if self.borderMap(i,j) == 1
                         self.obstacle=[self.obstacle;[j i]];
-                    end
-                    if self.borderMap(i,j) ==1
-                        plot(j-0.5,i-0.5,'rx');%在每一格是障碍物的地方画红色叉
+	plot(j-0.5,i-0.5,'rx');%在每一格是障碍物的地方画红色叉
                     end
                     if self.borderMap(i,j) ==2
-                        plot(j-0.5,i-0.5,'b*');%在每一格是障碍物的地方画红色叉
+                        plot(j-0.5,i-0.5,'gx');%边缘处画绿叉
                     end
                 end
             end
@@ -337,6 +338,7 @@ classdef Policy < handle
         function [openflag,id] = getopenflag(self,node,open)
             openflag = 0;
             id = 0;
+            %仅初始化一次
             if  isempty(open)
                 openflag = 0;
             else
@@ -422,23 +424,11 @@ classdef Policy < handle
                 self.path=[self.path(1:k,:);pathin;self.path(k+1:end,:)];
             end
         end
-        %%
+        
+        %% 把弧度转换到(-pi,pi]的区间
         function out = changerad(self,in)
             in = mod(in,2*pi);
             out = in.*(0<=in & in <= pi) + (in - 2*pi).*(pi<in & in<2*2*pi);   % x in (-pi,pi]
-        end
-        %%
-        function checkpath(self)
-            len = length(self.lastpath(:,1));
-            for i=1:len
-                %局部搜索的关键思想：检验地图上的障碍物和最优路径是否有重合
-                %有重合说明需要重新规划路径，将flag设为0
-                if self.borderMap( self.lastpath(i,2),self.lastpath(i,1) )==1 || self.borderMap(self.lastpath(i,2),self.lastpath(i,1))==2
-                    self.getpathflag=0;
-                    break;
-                end
-                
-            end
         end
     end
 end
